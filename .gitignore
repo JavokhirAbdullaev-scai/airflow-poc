@@ -10,8 +10,5 @@ webserver_config.py
 airflow.cfg
 airflow.db
 
-airflow-poc/
-airflow-poc/**
-poc/**
-poc/
-.astro/
+.airflow-poc/
+
