@@ -1,0 +1,108 @@
+services:
+  oltp:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: smartcity
+    ports:
+      - '5432:5432'
+    volumes:
+      - oltp-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d smartcity -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - smartcity
+
+  olap:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: smartcity
+    ports:
+      - '5433:5432'
+    volumes:
+      - olap-data:/var/lib/postgresql/data
+      - ./olap/script:/docker-entrypoint-initdb.d
+      - ./olap/data:/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d smartcity -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - smartcity
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.2
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka:29092,EXTERNAL://localhost:9092'
+      KAFKA_LISTENERS: 'INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+    healthcheck:
+      test: [ "CMD", "kafka-topics", "--bootstrap-server", "kafka:29092", "--list" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - smartcity
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui
+    ports:
+      - '18080:8080'
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_METRICS_PORT: 29092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    depends_on:
+      - kafka
+    networks:
+      - smartcity
+
+  backend:
+    image: scaismartcitydeploymentlocal-backend:latest
+    env_file:
+      - .env
+    ports:
+      - '8080:8080'
+    depends_on:
+      oltp:
+        condition: service_healthy
+      olap:
+        condition: service_healthy
+    networks:
+      - smartcity
+
+
+volumes:
+  oltp-data:
+  olap-data:
+
+networks:
+  smartcity:
+    name: smartcity
+    driver: bridge

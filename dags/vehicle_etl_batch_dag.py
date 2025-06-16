@@ -1,19 +1,18 @@
+import json
+import logging
+import uuid
 from datetime import datetime, timedelta
+
 from airflow import DAG
+from airflow.hooks.base import BaseHook
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.providers.postgres.operators.postgres import PostgresOperator
-import json
-import uuid
-import logging
 from kafka import KafkaConsumer
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import re
+from airflow.models import Variable
 
 # Default arguments for the DAG
 default_args = {
-    'owner': 'data-team',
+    'owner': 'JavokhirAbdullaev',
     'depends_on_past': False,
     'start_date': datetime(2024, 1, 1),
     'email_on_failure': False,
@@ -33,20 +32,24 @@ dag = DAG(
 )
 
 
-def extract_kafka_and_db_data(**context):
+def extract_kafka_data(**context):
     """
     Extract data from Kafka topic and PostgreSQL lookup tables
     """
     logging.info("Starting data extraction from Kafka and PostgreSQL")
 
-    # Kafka configuration
+    # Fetch Kafka connection from Airflow
+    kafka_conn = BaseHook.get_connection('kafka_conn')
     kafka_config = {
-        'bootstrap_servers': ['kafka:29092'],
+        'bootstrap_servers': [f"{kafka_conn.host}:{kafka_conn.port}"],
         'group_id': 'airflow_enrichment',
         'auto_offset_reset': 'earliest',
         'value_deserializer': lambda x: json.loads(x.decode('utf-8')),
         'consumer_timeout_ms': 30000  # 30 seconds timeout
     }
+    # Add extra config if present
+    if kafka_conn.extra_dejson.get('security_protocol'):
+        kafka_config['security_protocol'] = kafka_conn.extra_dejson['security_protocol']
 
     # Extract from Kafka
     consumer = KafkaConsumer('vehicle-topic-v1', **kafka_config)
@@ -54,6 +57,7 @@ def extract_kafka_and_db_data(**context):
 
     try:
         for message in consumer:
+            print("retrieved: " + message.value['camera_id'])
             kafka_messages.append(message.value)
             if len(kafka_messages) >= 100:  # Batch size limit
                 break
@@ -64,44 +68,7 @@ def extract_kafka_and_db_data(**context):
 
     logging.info(f"Extracted {len(kafka_messages)} messages from Kafka")
 
-    # Extract lookup data from PostgreSQL OLTP
-    oltp_hook = PostgresHook(postgres_conn_id='postgres_oltp')
-
-    # Color lookup
-    color_lookup = oltp_hook.get_records(
-        "SELECT id, name FROM sc_vehicle_color_lk"
-    )
-
-    # MMCT lookup (Make, Model, Category, Type)
-    mmct_lookup = oltp_hook.get_records(
-        """SELECT mmct.category_id, mmct.type_id, t.name as type_name, m.name AS model_name
-           FROM sc_vehicle_mmct_lk mmct
-                    JOIN sc_vehicle_model_lk m ON m.id = mmct.model_id
-                    JOIN sc_vehicle_type_lk as t on t.id = mmct.type_id"""
-    )
-
-    # Camera lookup
-    camera_lookup = oltp_hook.get_records(
-        """SELECT c.id as id, c.reference_id, z.id as zone_id, z.organization_id as tenant_id
-           FROM sc_camera AS c
-                    JOIN sc_zone as z on z.id = c.zone_id"""
-    )
-
-    # Store data in XCom for next task
-    extracted_data = {
-        'kafka_messages': kafka_messages,
-        'lookups': {
-            'colors': {row[1]: row[0] for row in color_lookup},  # name -> id
-            'mmct': {row[3]: {'category_id': row[0], 'type_id': row[1], 'type_name': row[2]}
-                     for row in mmct_lookup},  # model_name -> details
-            'cameras': {row[1]: {'id': row[0], 'zone_id': row[2], 'tenant_id': row[3]}
-                        for row in camera_lookup}  # reference_id -> details
-        }
-    }
-
-    logging.info(
-        f"Extracted lookup data: {len(color_lookup)} colors, {len(mmct_lookup)} mmct, {len(camera_lookup)} cameras")
-    return extracted_data
+    return {'kafka_messages': kafka_messages}
 
 
 def transform_normalize_events(**context):
@@ -113,7 +80,7 @@ def transform_normalize_events(**context):
     # Get extracted data from previous task
     extracted_data = context['task_instance'].xcom_pull(task_ids='extract_task')
     kafka_messages = extracted_data['kafka_messages']
-    lookups = extracted_data['lookups']
+    lookups = json.loads(Variable.get("vehicle_lookups", deserialize_json=True))
 
     normalized_events = []
     dlq_events = []
@@ -150,7 +117,7 @@ def normalize_event(event, lookups):
     }
 
     # Handle vehicle bbox
-    bbox = event.get('bbox', [])
+    bbox = event.get('bbox') or []
     if len(bbox) == 4:
         normalized['vehicle_bbox'] = bbox
     else:
@@ -252,20 +219,6 @@ def load_to_timescaledb(**context):
     # Load to TimescaleDB
     olap_hook = PostgresHook(postgres_conn_id='postgres_olap')
 
-    insert_query = """
-                   INSERT INTO sc_vehicle (id, frame_time, type_name, type_id, color_id, color_name, \
-                                           make, model, plate_text_latin, plate_text_arabic, \
-                                           mmc_confidence, plate_confidence, text_confidence, \
-                                           dwell_time_seconds, plate_bbox, vehicle_bbox, \
-                                           category_id, zone_id, tenant_id, camera_id) \
-                   VALUES (%(record_id)s::uuid, %(frame_time)s::timestamp with time zone, \
-                           %(type_name)s, %(type_id)s::int, %(color_id)s::int, %(color_name)s, \
-                           %(make)s, %(model)s, %(plate_text_latin)s, %(plate_text_arabic)s, \
-                           %(mmc_confidence)s::float, %(plate_confidence)s::float, %(text_confidence)s::float, \
-                           %(dwell_time_seconds)s::numeric, %(plate_bbox)s::int[], %(vehicle_bbox)s::int[], \
-                           %(category_id)s::int, %(zone_id)s::uuid, %(tenant_id)s::uuid, %(camera_id)s::uuid) \
-                   """
-
     # Batch insert normalized events
     if normalized_events:
         olap_hook.insert_rows(
@@ -290,7 +243,7 @@ def load_to_timescaledb(**context):
 # Define tasks
 extract_task = PythonOperator(
     task_id='extract_task',
-    python_callable=extract_kafka_and_db_data,
+    python_callable=extract_kafka_data,
     dag=dag,
 )
 

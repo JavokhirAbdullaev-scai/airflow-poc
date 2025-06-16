@@ -1,7 +1,9 @@
-apache-airflow==3.0.2
 confluent-kafka==2.3.0
 psycopg2-binary==2.9.9
-kafka-python==2.0.2
+kafka-python-ng==2.2.3
+apache-airflow-providers-apache-kafka
+apache-airflow-providers-postgres==5.0.0
+airflow-operators
 SQLAlchemy==1.4.53
 ujson==5.9.0
 python-dateutil==2.8.2

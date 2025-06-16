@@ -1,7 +1,12 @@
+Airflow PoC
+=======
+
 Overview
 ========
-
-Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+this is a proof of concept (PoC) project for demonstrating the ETL data enrichment pipeline using Apache Airflow for processing vehicle data.
+By extracting the data from the kafka topic, and PostGis Transactional database, transforming it using the Python operator, 
+and loading it into the Timescale analytical database,
+this project showcases the capabilities of Airflow in orchestrating and batch processing complex workflows.
 
 Project Contents
 ================
@@ -32,14 +37,15 @@ This command will spin up five Docker containers on your machine, each for a dif
 
 When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
 
-Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
-
-Deploy Your Project to Astronomer
-=================================
-
-If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
-
-Contact
-=======
-
-The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+Note: if you receive an error that says:
+```
+Error: error building, (re)creating or starting project containers: Error response from daemon: Ports are not available: exposing port TCP 127.0.0.1:8080 -> 127.0.0.1:0: listen tcp 127.0.0.1:8080: bind: An attempt was made to access a socket in a way forbidden by its access permissions.
+````
+* Set webserver_port to a different port in `astro config set webserver.port 8081`.
+* Create `astro.config.yaml` file with the following content:
+```yaml
+project:
+  ports:
+    - 8081:8080
+````
+* Then run `astro dev start` again.
