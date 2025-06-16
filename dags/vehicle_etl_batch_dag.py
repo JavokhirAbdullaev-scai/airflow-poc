@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import uuid
@@ -9,6 +10,8 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from kafka import KafkaConsumer
 from airflow.models import Variable
+from kafka.producer.kafka import KafkaProducer
+import csv
 
 # Default arguments for the DAG
 default_args = {
@@ -17,7 +20,7 @@ default_args = {
     'start_date': datetime(2024, 1, 1),
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 1,
+    'retries': 3,
     'retry_delay': timedelta(minutes=5),
 }
 
@@ -26,7 +29,7 @@ dag = DAG(
     'vehicle_data_enrichment',
     default_args=default_args,
     description='Extract vehicle data from Kafka, enrich with PostgreSQL lookups, and load to TimescaleDB',
-    schedule_interval=timedelta(minutes=10),
+    schedule_interval=timedelta(minutes=1),
     catchup=False,
     tags=['vehicle', 'kafka', 'enrichment', 'timescaledb']
 )
@@ -59,7 +62,7 @@ def extract_kafka_data(**context):
         for message in consumer:
             print("retrieved: " + message.value['camera_id'])
             kafka_messages.append(message.value)
-            if len(kafka_messages) >= 100:  # Batch size limit
+            if len(kafka_messages) >= 1000:  # Batch size limit
                 break
     except Exception as e:
         logging.warning(f"Kafka consumer timeout or error: {e}")
@@ -112,9 +115,22 @@ def normalize_event(event, lookups):
     Normalize a single event with enrichment data
     """
     normalized = {
-        'record_id': str(uuid.uuid4()),
-        'frame_time': datetime.fromtimestamp(event.get('timestamp', datetime.now().timestamp())),
+        'record_id': str(uuid.uuid4())
     }
+
+    # Handle timestamp robustly
+    timestamp = event.get('timestamp')
+    try:
+        if isinstance(timestamp, (int, float)):
+            normalized['frame_time'] = datetime.fromtimestamp(timestamp)
+        elif isinstance(timestamp, str):
+            normalized['frame_time'] = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        else:
+            raise ValueError(f"Invalid timestamp format: {timestamp}")
+    except (ValueError, TypeError) as e:
+        logging.warning(f"Invalid timestamp in event: {timestamp}, using current time")
+        normalized['frame_time'] = datetime.now()
+        raise ValueError(f"Invalid timestamp: {str(e)}")  # Send to DLQ
 
     # Handle vehicle bbox
     bbox = event.get('bbox') or []
@@ -131,7 +147,7 @@ def normalize_event(event, lookups):
     normalized['text_confidence'] = float(license_plate.get('text_confidence', 0.0))
 
     # Handle plate bbox
-    plate_bbox = license_plate.get('bbox', [])
+    plate_bbox = license_plate.get('bbox') or []
     if len(plate_bbox) == 4:
         normalized['plate_bbox'] = plate_bbox
     else:
@@ -184,8 +200,7 @@ def clean_text(text):
 
     # Remove null bytes and invalid UTF-8
     cleaned = text.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-    cleaned = cleaned.replace('\x00', '')
-    cleaned = cleaned.strip()
+    cleaned = cleaned.replace('\x00', '').strip()
 
     # Limit length to avoid PostgreSQL errors
     return cleaned[:255]
@@ -198,12 +213,16 @@ def is_valid_event(event):
     # Check for required fields
     required_checks = [
         event.get('record_id'),
+        isinstance(event['frame_time'], datetime),  # Ensure valid timestamp
         event.get('make') or event.get('model') or event.get('plate_text_latin') or
         event.get('plate_text_arabic') or event.get('color_id', 0) > 0
     ]
 
     return all(required_checks)
 
+def to_pg_array(arr):
+    """Convert a list to PostgreSQL array format"""
+    return "{" + ",".join(str(x) for x in arr) + "}" if arr else "{}"
 
 def load_to_timescaledb(**context):
     """
@@ -221,16 +240,53 @@ def load_to_timescaledb(**context):
 
     # Batch insert normalized events
     if normalized_events:
-        olap_hook.insert_rows(
-            table='sc_vehicle',
-            rows=[list(event.values()) for event in normalized_events],
-            target_fields=list(normalized_events[0].keys()) if normalized_events else []
-        )
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer, quoting=csv.QUOTE_MINIMAL)
+        for event in normalized_events:
+            row = [
+                event['record_id'],
+                event['frame_time'].isoformat(), # Always a datetime, ensured by normalize_event
+                event['type_name'],
+                event['type_id'],
+                event['color_id'],
+                event['color_name'],
+                event['make'],
+                event['model'],
+                event['plate_text_latin'],
+                event['plate_text_arabic'],
+                event['mmc_confidence'],
+                event['plate_confidence'],
+                event['text_confidence'],
+                event['dwell_time_seconds'],
+                to_pg_array(event['plate_bbox']),
+                to_pg_array(event['vehicle_bbox']),
+                event['category_id'],
+                event['zone_id'],
+                event['tenant_id'],
+                event['camera_id'],
+            ]
+            writer.writerow(row)
+        csv_buffer.seek(0)
+        conn = olap_hook.get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.copy_expert("COPY sc_vehicle (id, frame_time, type_name, type_id, color_id, color_name, make, model, plate_text_latin, plate_text_arabic, mmc_confidence, plate_confidence, text_confidence, dwell_time_seconds, plate_bbox, vehicle_bbox, category_id, zone_id, tenant_id, camera_id) FROM STDIN WITH CSV", csv_buffer)
+            conn.commit()
+        except Exception as e:
+            logging.error(f"Error during COPY: {e}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
 
     # Send DLQ events to Kafka DLQ topic (simplified - in real implementation use KafkaProducer)
     if dlq_events:
         logging.warning(f"Sending {len(dlq_events)} events to DLQ")
-        # In a real implementation, you would send these to a Kafka DLQ topic
+        kafka_conn = BaseHook.get_connection('kafka_conn')
+        producer = KafkaProducer(bootstrap_servers=[f"{kafka_conn.host}:{kafka_conn.port}"])
+        for event in dlq_events:
+            producer.send('vehicle-dlq-v1', json.dumps(event).encode('utf-8'))
+        producer.flush()
 
     logging.info(f"Successfully loaded {len(normalized_events)} events to TimescaleDB")
 
@@ -241,6 +297,7 @@ def load_to_timescaledb(**context):
 
 
 # Define tasks
+
 extract_task = PythonOperator(
     task_id='extract_task',
     python_callable=extract_kafka_data,

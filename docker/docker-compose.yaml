@@ -28,7 +28,6 @@ services:
     volumes:
       - olap-data:/var/lib/postgresql/data
       - ./olap/script:/docker-entrypoint-initdb.d
-      - ./olap/data:/data
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -d smartcity -U postgres" ]
       interval: 10s

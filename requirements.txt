@@ -3,6 +3,7 @@ psycopg2-binary==2.9.9
 kafka-python-ng==2.2.3
 apache-airflow-providers-apache-kafka
 apache-airflow-providers-postgres==5.0.0
+apache-airflow-providers-standard
 airflow-operators
 SQLAlchemy==1.4.53
 ujson==5.9.0

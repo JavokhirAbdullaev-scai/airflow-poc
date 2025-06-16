@@ -51,11 +51,10 @@ def initialize_lookups():
     lookups = {'colors': colors, 'mmct': mmct, 'cameras': cameras}
     Variable.set("vehicle_lookups", json.dumps(lookups), serialize_json=True)
     logging.info(f"Stored {len(colors)} colors, {len(mmct)} mmct, {len(cameras)} cameras in Variables")
+    return lookups
 
 initialize_task = PythonOperator(
     task_id='initialize_lookups',
     python_callable=initialize_lookups,
     dag=dag,
 )
-
-initialize_task
