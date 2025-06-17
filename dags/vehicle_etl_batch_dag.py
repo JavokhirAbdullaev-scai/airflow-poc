@@ -12,6 +12,15 @@ from kafka import KafkaConsumer
 from airflow.models import Variable
 from kafka.producer.kafka import KafkaProducer
 import csv
+import os
+
+
+# Read from environment variables with defaults
+KAFKA_GROUP_ID = os.environ.get('KAFKA_GROUP_ID', 'airflow_enrichment')
+KAFKA_TOPIC = os.environ.get('KAFKA_TOPIC', 'vehicle-topic-v1')
+KAFKA_DLQ_TOPIC = os.environ.get('KAFKA_DLQ_TOPIC', 'vehicle-dlq-v1')
+KAFKA_BATCH_SIZE = int(os.environ.get('KAFKA_BATCH_SIZE', 1000))
+
 
 # Default arguments for the DAG
 default_args = {
@@ -45,7 +54,7 @@ def extract_kafka_data(**context):
     kafka_conn = BaseHook.get_connection('kafka_conn')
     kafka_config = {
         'bootstrap_servers': [f"{kafka_conn.host}:{kafka_conn.port}"],
-        'group_id': 'airflow_enrichment',
+        'group_id': KAFKA_GROUP_ID,
         'auto_offset_reset': 'earliest',
         'value_deserializer': lambda x: json.loads(x.decode('utf-8')),
         'consumer_timeout_ms': 30000  # 30 seconds timeout
@@ -55,14 +64,14 @@ def extract_kafka_data(**context):
         kafka_config['security_protocol'] = kafka_conn.extra_dejson['security_protocol']
 
     # Extract from Kafka
-    consumer = KafkaConsumer('vehicle-topic-v1', **kafka_config)
+    consumer = KafkaConsumer(KAFKA_TOPIC, **kafka_config)
     kafka_messages = []
 
     try:
         for message in consumer:
             print("retrieved: " + message.value['camera_id'])
             kafka_messages.append(message.value)
-            if len(kafka_messages) >= 1000:  # Batch size limit
+            if len(kafka_messages) >= KAFKA_BATCH_SIZE:  # Batch size limit
                 break
     except Exception as e:
         logging.warning(f"Kafka consumer timeout or error: {e}")
@@ -285,7 +294,7 @@ def load_to_timescaledb(**context):
         kafka_conn = BaseHook.get_connection('kafka_conn')
         producer = KafkaProducer(bootstrap_servers=[f"{kafka_conn.host}:{kafka_conn.port}"])
         for event in dlq_events:
-            producer.send('vehicle-dlq-v1', json.dumps(event).encode('utf-8'))
+            producer.send(KAFKA_DLQ_TOPIC, json.dumps(event).encode('utf-8'))
         producer.flush()
 
     logging.info(f"Successfully loaded {len(normalized_events)} events to TimescaleDB")
