@@ -19,7 +19,7 @@ import os
 KAFKA_GROUP_ID = os.environ.get('KAFKA_GROUP_ID', 'airflow_enrichment')
 KAFKA_TOPIC = os.environ.get('KAFKA_TOPIC', 'vehicle-topic-v1')
 KAFKA_DLQ_TOPIC = os.environ.get('KAFKA_DLQ_TOPIC', 'vehicle-dlq-v1')
-KAFKA_BATCH_SIZE = int(os.environ.get('KAFKA_BATCH_SIZE', 1000))
+KAFKA_BATCH_SIZE = int(os.environ.get('KAFKA_BATCH_SIZE', 100000))
 
 
 # Default arguments for the DAG
@@ -69,7 +69,6 @@ def extract_kafka_data(**context):
 
     try:
         for message in consumer:
-            print("retrieved: " + message.value['camera_id'])
             kafka_messages.append(message.value)
             if len(kafka_messages) >= KAFKA_BATCH_SIZE:  # Batch size limit
                 break

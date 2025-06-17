@@ -1,6 +1,5 @@
 from kafka import KafkaProducer
 import json
-import time
 import random
 import uuid
 from datetime import datetime, timedelta
@@ -17,9 +16,10 @@ producer = KafkaProducer(
     bootstrap_servers=bootstrap_servers,
     value_serializer=lambda v: json.dumps(v).encode('utf-8')
 )
+started_time = datetime.now().timestamp()
 
-# Generate 1000 events
-for _ in range(1000):
+# Generate 100000 events
+for _ in range(100000):
     event = {
         'timestamp': int((datetime.now() - timedelta(seconds=random.randint(0, 3600))).timestamp()),
         'camera_id': str(uuid.uuid4()),
@@ -42,8 +42,10 @@ for _ in range(1000):
         'dwell_time': round(random.uniform(1, 10), 2)
     }
     producer.send(KAFKA_TOPIC, event)
-    time.sleep(0.01)  # Small delay to avoid overwhelming broker
+    # time.sleep(0.01)  # Small delay to avoid overwhelming broker
 
 producer.flush()
 producer.close()
-print("Sent 1000 events to Kafka topic:", KAFKA_TOPIC)
+
+print("duration: ", datetime.now().timestamp() - started_time)
+print("Sent 100000 events to Kafka topic:", KAFKA_TOPIC)
